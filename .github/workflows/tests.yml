@@ -5,6 +5,12 @@ on:
     branches: ["**"]
   pull_request:
   workflow_call:  # so the release pipeline can gate on this
+  workflow_dispatch:  # so a run that starts no jobs can be retried by hand
+
+# The suite only reads the checkout. Naming the scope explicitly keeps the
+# token minimal regardless of the repository's default permissions.
+permissions:
+  contents: read
 
 jobs:
   macos:
