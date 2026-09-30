@@ -31,7 +31,10 @@ Choose the level that fits how you want to use SidePulse.
 curl -fsSL https://sidepulse.io/setup.sh | bash
 ```
 
-The command works on macOS and Linux with Python 3.10 or newer. The
+The command works on macOS and Linux. It uses an existing Python 3.10 or newer
+when available. On macOS, if a suitable Python is missing, it automatically
+downloads Python 3.13 using uv into `~/.local/share/sidepulse`, without requiring
+Homebrew or administrator access. On Linux, install Python 3.10 or newer first. The
 [setup script](scripts/setup.sh) creates an isolated environment under
 `~/.local/share/sidepulse/venv`, installs SidePulse from GitHub, links the CLI
 at `~/.local/bin/sidepulse`, and runs `sidepulse setup`. On macOS, setup also
