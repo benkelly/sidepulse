@@ -484,7 +484,7 @@ def _cmd_sidepulse_delivery(
                 link,
                 program,
                 event_id=event_id,
-                title=title,
+                title="Update" if command == "push" and not has_notification else title,
                 message=message,
                 data=event_data,
             )

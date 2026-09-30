@@ -445,6 +445,41 @@ class WriteFallbackTests(unittest.TestCase):
         self.assertEqual(send.call_args.kwargs["title"], "Agent needs input")
         self.assertEqual(send.call_args.kwargs["message"], "Choose a deployment region")
 
+    def test_led_only_push_sends_update_notification(self) -> None:
+        phone = IOSLink("Phone", TOKEN_A)
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = b"OK"
+        with (
+            patch("sidepulse.cli.discover_devices", return_value=[]),
+            patch("sidepulse.cli.load_ios_links", return_value=(phone,)),
+            patch("sidepulse.cli._remote_event_data", return_value={}),
+            patch("sidepulse.links.urllib.request.urlopen", return_value=response) as open_url,
+        ):
+            result = sidepulse_main(["push", r"off\n#ff0000 pulse"])
+
+        self.assertEqual(result, 0)
+        payload = json.loads(open_url.call_args.args[0].data)
+        self.assertEqual(payload["leds"], "off\n#ff0000 pulse")
+        self.assertEqual(payload["title"], "Update")
+        self.assertEqual(payload["aps"]["alert"], {"title": "Update"})
+        self.assertNotIn("body", payload)
+
+    def test_led_only_push_can_fall_back_to_local_device(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "SidePulseDot"
+            root.mkdir()
+            candidate = type("Candidate", (), {"root": root, "target": root / "LEDS.LED"})()
+            with (
+                patch("sidepulse.cli.discover_devices", return_value=[candidate]),
+                patch("sidepulse.cli.load_ios_links", return_value=()),
+                patch("sidepulse.cli.send_ios_program") as send,
+            ):
+                result = sidepulse_main(["push", "off"])
+
+            self.assertEqual(result, 0)
+            self.assertEqual((root / "LEDS.LED").read_text(), "off")
+            send.assert_not_called()
+
     def test_write_all_sends_leds_locally_and_combined_payload_to_phone(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "SidePulseDot"

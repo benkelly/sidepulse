@@ -271,7 +271,8 @@ under `$XDG_CONFIG_HOME/sidepulse/agent-monitor/links.json`). Pair with the
 updated iOS build by scanning the QR code or pasting its current push token.
 Do not add or remove `dev_` by hand; the token determines the bridge route.
 
-Linked phones are stored locally. Remote LED-only writes are silent. Adding
+Linked phones are stored locally. Remote LED-only `write` commands are silent;
+LED-only `push` commands use the notification title `Update`. Adding
 `--title` or `--message` produces one visible notification containing the same
 LED program and event metadata. Remote payloads also include the sending
 computer's name and available battery state. Set `SIDEPULSE_SERVER` to use
