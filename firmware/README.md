@@ -3,6 +3,21 @@
 Firmware ZIP files are organized by version. Download the ZIP for your SidePulse
 model; firmware is specific to each model.
 
+## v1.1.14
+
+| Model | Download |
+| --- | --- |
+| SidePulse Dot | [sidepulse-dot-1.1.14-ota.zip](v1.1.14/sidepulse-dot-1.1.14-ota.zip) |
+
+[SHA-256 checksums](v1.1.14/SHA256SUMS.txt).
+
+### SidePulse Dot
+
+- Improve direct USB connection compatibility with Android phones.
+- Improve drive identification when using multiple Dots.
+
+SidePulse Pro remains on [v1.1.0](v1.1.0/sidepulse-pro-1.1.0-ota.zip).
+
 ## v1.1.0
 
 First firmware release distributed in this repository.
