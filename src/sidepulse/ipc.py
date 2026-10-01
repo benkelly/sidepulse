@@ -145,11 +145,16 @@ class HookEventServer:
                 self._handle_connection(connection)
 
     def _handle_connection(self, connection: socket.socket) -> None:
+        # A stalled client must not block the accept loop.
+        # On a timeout, parse the bytes that arrived.
+        connection.settimeout(1.0)
         chunks: list[bytes] = []
         total = 0
         while True:
             try:
                 chunk = connection.recv(65536)
+            except TimeoutError:
+                break
             except OSError:
                 return
             if not chunk:
