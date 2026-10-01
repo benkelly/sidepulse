@@ -628,7 +628,8 @@ class AgentMonitorTests(unittest.TestCase):
             stalled = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
                 server.start()
-                # This client sends a full message and then holds the connection open.
+                # This client sends a full message and never sends EOF. It then sends a
+                # space every 0.1 s, so a timeout per recv() never expires.
                 stalled.connect(str(server.socket_path))
                 stalled.sendall(b'{"provider":"codex","line":{"session_id":"stalled"}}')
                 sent = send_hook_event(
@@ -640,7 +641,11 @@ class AgentMonitorTests(unittest.TestCase):
 
                 deadline = time.time() + 3
                 while sent and len(received) < 2 and time.time() < deadline:
-                    time.sleep(0.01)
+                    try:
+                        stalled.send(b" ")
+                    except OSError:
+                        pass  # The server closed the connection at its deadline.
+                    time.sleep(0.1)
 
                 self.assertTrue(sent)
                 self.assertEqual(received, ["stalled", "next"])
