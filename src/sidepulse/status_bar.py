@@ -388,6 +388,7 @@ SYSTEM_POLL_ERROR_BACKOFF_SECONDS = 30.0
 LID_ANIMATION_RESTORE_FUDGE_SECONDS = 0.15
 AGENT_ANIMATION_DEVICE_PREVIEW_SECONDS = 3.0
 AGENT_ANIMATION_EDITOR_DEVICE_PREVIEW_SECONDS = 10.0
+SOCKET_SHOW_MAX_SECONDS = 60.0
 AGENT_ANIMATION_PROFILE_CUSTOM = ""
 LID_ANIMATION_LABELS = {
     LID_ANIMATION_CLOSED: "Lid Closed",
@@ -1243,6 +1244,7 @@ class StatusBarController(NSObject):
         self.event_server = HookEventServer(
             self.handle_hook_event_message,
             on_open_settings=self.schedule_open_settings,
+            on_show=self.schedule_program_show,
         )
         try:
             socket_path = self.event_server.start()
@@ -1259,6 +1261,20 @@ class StatusBarController(NSObject):
     def schedule_open_settings(self) -> None:
         self.performSelectorOnMainThread_withObject_waitUntilDone_(
             "openSettings:", None, False,
+        )
+
+    def schedule_program_show(self, program: str, seconds: float) -> None:
+        # This method runs on the socket thread. It rejects bad input before the
+        # main-thread hop, so the client gets the error in its reply.
+        if not 0 < seconds <= SOCKET_SHOW_MAX_SECONDS:
+            raise ValueError(
+                f"seconds must be more than 0 and at most {SOCKET_SHOW_MAX_SECONDS:g}"
+            )
+        validate_agent_animation_program(program)
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "showProgramFromSocket:",
+            json.dumps({"program": program, "seconds": seconds}),
+            False,
         )
 
     def handle_hook_event_message(self, provider: str, line: dict) -> None:
@@ -2520,43 +2536,47 @@ class StatusBarController(NSObject):
     def show_agent_animation_editor_on_device(self) -> None:
         status = self.agent_animation_editor_preview_status
         try:
-            if not self.leds_enabled:
-                raise ValueError("Connect LEDs before showing this animation.")
-            program = normalize_led_text(
-                text_control_value(self.agent_animation_editor_program)
+            self.start_program_show(
+                text_control_value(self.agent_animation_editor_program),
+                AGENT_ANIMATION_EDITOR_DEVICE_PREVIEW_SECONDS,
             )
-            validate_agent_animation_program(program)
-            devices = [
-                device
-                for device in self.status_bar_devices()
-                if (
-                    device.connected
-                    and device.device_id != VIRTUAL_DEVICE_ID
-                    and device.remote_link is None
-                    and device.display != LED_DISPLAY_CUSTOM
-                )
-            ]
-            if not devices:
-                raise ValueError("No connected physical LED device found.")
         except Exception as exc:
             if status is not None:
                 status.setStringValue_(str(exc))
                 status.setTextColor_(NSColor.systemRedColor())
             return
 
-        self.led_animation_token += 1
-        token = self.led_animation_token
-        self.led_animation_until_monotonic = (
-            time.monotonic() + AGENT_ANIMATION_EDITOR_DEVICE_PREVIEW_SECONDS
-        )
         if status is not None:
             status.setStringValue_(
                 f"Showing for {AGENT_ANIMATION_EDITOR_DEVICE_PREVIEW_SECONDS:g} seconds"
             )
             status.setTextColor_(NSColor.secondaryLabelColor())
+
+    def start_program_show(self, program: str, seconds: float) -> None:
+        """Play the program on each connected physical device, then restore live status."""
+        if not self.leds_enabled:
+            raise ValueError("Connect LEDs before showing this animation.")
+        program = normalize_led_text(program)
+        validate_agent_animation_program(program)
+        devices = [
+            device
+            for device in self.status_bar_devices()
+            if (
+                device.connected
+                and device.device_id != VIRTUAL_DEVICE_ID
+                and device.remote_link is None
+                and device.display != LED_DISPLAY_CUSTOM
+            )
+        ]
+        if not devices:
+            raise ValueError("No connected physical LED device found.")
+
+        self.led_animation_token += 1
+        token = self.led_animation_token
+        self.led_animation_until_monotonic = time.monotonic() + seconds
         thread = threading.Thread(
             target=self.show_animation_program_on_device_worker,
-            args=(program, devices, token),
+            args=(program, devices, token, seconds),
             daemon=True,
         )
         thread.start()
@@ -2566,6 +2586,7 @@ class StatusBarController(NSObject):
         program: str,
         devices: list[StatusBarDevice],
         token: int,
+        seconds: float = AGENT_ANIMATION_EDITOR_DEVICE_PREVIEW_SECONDS,
     ) -> None:
         for device in devices:
             try:
@@ -2581,7 +2602,7 @@ class StatusBarController(NSObject):
                 log_status_bar(
                     f"custom animation preview error {device.name}: {exc}"
                 )
-        time.sleep(AGENT_ANIMATION_EDITOR_DEVICE_PREVIEW_SECONDS)
+        time.sleep(seconds)
         self.performSelectorOnMainThread_withObject_waitUntilDone_(
             "restoreLedDisplay:",
             str(token),
@@ -3292,6 +3313,10 @@ class StatusBarController(NSObject):
     @objc.IBAction
     def restoreLedDisplay_(self, token_value):
         restore_led_display(self, token_value)
+
+    @objc.IBAction
+    def showProgramFromSocket_(self, payload):
+        show_program_from_socket(self, payload)
 
     def connect_device(self) -> None:
         self.leds_enabled = True
@@ -5752,6 +5777,15 @@ def restore_led_display(target, token_value) -> None:
         )
     else:
         target.refresh_(None)
+
+
+def show_program_from_socket(target, payload) -> None:
+    try:
+        request = json.loads(str(payload))
+        target.start_program_show(request["program"], float(request["seconds"]))
+        log_status_bar(f"socket show seconds={request['seconds']:g}")
+    except Exception as exc:
+        log_status_bar(f"socket show error: {exc}")
 
 
 def hook_status_text(config: ProviderConfig) -> str:

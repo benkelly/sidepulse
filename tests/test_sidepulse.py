@@ -50,7 +50,7 @@ from sidepulse.device_writer import (
     write_led_program,
 )
 from sidepulse.hook import format_hook_payload, routed_hook_payload, write_hook_payload
-from sidepulse.ipc import HookEventServer, send_hook_event
+from sidepulse.ipc import HookEventServer, request_program_show, send_hook_event
 from sidepulse.install import (
     hook_command,
     install_claude_hooks,
@@ -2410,6 +2410,55 @@ class AgentMonitorTests(unittest.TestCase):
                 restore_calls,
                 [("restoreLedDisplay:", "17", False)],
             )
+
+    def test_status_bar_socket_show_is_validated_then_scheduled(self) -> None:
+        try:
+            from sidepulse import status_bar
+        except SystemExit as exc:
+            self.skipTest(str(exc))
+
+        scheduled = []
+        fake = SimpleNamespace(
+            performSelectorOnMainThread_withObject_waitUntilDone_=(
+                lambda selector, value, wait: scheduled.append(
+                    (selector, json.loads(value), wait)
+                )
+            )
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            server = HookEventServer(
+                lambda provider, line: None,
+                socket_path=Path(tmp) / "events.sock",
+                on_show=lambda program, seconds: (
+                    status_bar.StatusBarController.schedule_program_show(
+                        fake, program, seconds
+                    )
+                ),
+            )
+            try:
+                server.start()
+                path = server.socket_path
+                self.assertEqual(
+                    request_program_show("#00FF00 1s pulse", 5, socket_path=path),
+                    "ok",
+                )
+                # A zero duration and a program over the 20-line limit both fail.
+                for program, seconds in (("#00FF00 1s pulse", 0), ("off\n" * 30, 5)):
+                    reply = request_program_show(program, seconds, socket_path=path)
+                    self.assertTrue(reply.startswith("error: "), reply)
+            finally:
+                server.stop()
+
+        self.assertEqual(
+            scheduled,
+            [
+                (
+                    "showProgramFromSocket:",
+                    {"program": "#00FF00 1s pulse", "seconds": 5.0},
+                    False,
+                )
+            ],
+        )
 
     def test_status_history_status_text_is_compact(self) -> None:
         try:
