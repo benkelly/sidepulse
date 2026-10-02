@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -2387,11 +2388,13 @@ class AgentMonitorTests(unittest.TestCase):
             )
             restore_calls = []
             fake = SimpleNamespace(
+                led_animation_token=17,
+                led_animation_write_lock=threading.Lock(),
                 performSelectorOnMainThread_withObject_waitUntilDone_=(
                     lambda selector, value, wait: restore_calls.append(
                         (selector, value, wait)
                     )
-                )
+                ),
             )
 
             with patch("sidepulse.status_bar.time.sleep"):
@@ -2410,6 +2413,54 @@ class AgentMonitorTests(unittest.TestCase):
                 restore_calls,
                 [("restoreLedDisplay:", "17", False)],
             )
+
+    def test_status_bar_show_worker_writes_only_for_the_current_token(self) -> None:
+        try:
+            from sidepulse import status_bar
+        except SystemExit as exc:
+            self.skipTest(str(exc))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            device = status_bar.StatusBarDevice(
+                device_id=tmp,
+                name="SidePulse Pro",
+                root=Path(tmp),
+                target=Path(tmp) / "LEDS.LED",
+                connected=True,
+                display="agent",
+            )
+            restores = []
+            fake = SimpleNamespace(
+                led_animation_token=6,
+                led_animation_write_lock=threading.Lock(),
+                performSelectorOnMainThread_withObject_waitUntilDone_=(
+                    lambda selector, value, wait: restores.append(value)
+                ),
+            )
+            lock_held = []
+
+            def write(program, *, device_path):
+                lock_held.append(fake.led_animation_write_lock.locked())
+                return device_path
+
+            worker = status_bar.StatusBarController.show_animation_program_on_device_worker
+            with (
+                patch(
+                    "sidepulse.status_bar.write_led_program", side_effect=write
+                ) as write_program,
+                patch("sidepulse.status_bar.time.sleep") as sleep,
+            ):
+                # Token 5 is older than the current token 6, so its worker stops at once.
+                worker(fake, "#FF0000 1s pulse", [device], 5, 3)
+                write_program.assert_not_called()
+                sleep.assert_not_called()
+
+                worker(fake, "#FF0000 1s pulse", [device], 6, 3)
+
+            # The token check and the write must share the lock.
+            self.assertEqual(lock_held, [True])
+            sleep.assert_called_once_with(3)
+            self.assertEqual(restores, ["6"])
 
     def test_status_bar_socket_show_is_validated_then_scheduled(self) -> None:
         try:

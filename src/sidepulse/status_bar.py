@@ -654,6 +654,7 @@ class StatusBarController(NSObject):
         self.closed_lid_display_sleep_requested = False
         self.led_animation_until_monotonic = 0.0
         self.led_animation_token = 0
+        self.led_animation_write_lock = threading.Lock()
         self.virtual_status_device = VirtualStatusDevice.alloc().init()
         return self
 
@@ -2440,13 +2441,18 @@ class StatusBarController(NSObject):
     ) -> None:
         for device in devices:
             try:
-                result = write_mode_to_leds(
+                result = write_if_current(
+                    self,
+                    token,
+                    write_mode_to_leds,
                     mode,
                     device_path=device.target,
                     brightness=device.brightness,
                     animation_style=animation_style,
                     custom_program=custom_program,
                 )
+                if result is None:
+                    return
                 log_status_bar(
                     f"animation device preview={MODE_LABELS[mode]} "
                     f"device={device.name} target={result.target}"
@@ -2591,10 +2597,15 @@ class StatusBarController(NSObject):
         for device in devices:
             try:
                 scaled_program = apply_brightness(program, device.brightness)
-                target = write_led_program(
+                target = write_if_current(
+                    self,
+                    token,
+                    write_led_program,
                     scaled_program,
                     device_path=device.target,
                 )
+                if target is None:
+                    return
                 log_status_bar(
                     f"custom animation preview device={device.name} target={target}"
                 )
@@ -3298,7 +3309,11 @@ class StatusBarController(NSObject):
         for device in devices:
             try:
                 program = program_for_lid_animation(animation, brightness=device.brightness)
-                target = write_led_program(program, device_path=device.target)
+                target = write_if_current(
+                    self, token, write_led_program, program, device_path=device.target
+                )
+                if target is None:
+                    return
                 log_status_bar(f"animation={label} device={device.name} target={target}")
             except Exception as exc:
                 log_status_bar(f"animation error {label} {device.name}: {exc}")
@@ -5758,6 +5773,18 @@ def program_for_lid_animation(
 ) -> str:
     validate_lid_animation(animation)
     return apply_brightness(normalize_led_text(animation.program), brightness)
+
+
+def write_if_current(target, token: int, write, *args, **kwargs):
+    """Call write(*args, **kwargs) if token is still current, else return None.
+
+    The token check and the device write share one lock. An older show or
+    animation worker therefore cannot write after a newer one starts.
+    """
+    with target.led_animation_write_lock:
+        if token != target.led_animation_token:
+            return None
+        return write(*args, **kwargs)
 
 
 def restore_led_display(target, token_value) -> None:
