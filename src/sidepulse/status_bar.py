@@ -1246,6 +1246,7 @@ class StatusBarController(NSObject):
             self.handle_hook_event_message,
             on_open_settings=self.schedule_open_settings,
             on_show=self.schedule_program_show,
+            on_clear=self.schedule_program_clear,
         )
         try:
             socket_path = self.event_server.start()
@@ -1264,10 +1265,10 @@ class StatusBarController(NSObject):
             "openSettings:", None, False,
         )
 
-    def schedule_program_show(self, program: str, seconds: float) -> None:
+    def schedule_program_show(self, program: str, seconds: float | None) -> None:
         # This method runs on the socket thread. It rejects bad input before the
         # main-thread hop, so the client gets the error in its reply.
-        if not 0 < seconds <= SOCKET_SHOW_MAX_SECONDS:
+        if seconds is not None and not 0 < seconds <= SOCKET_SHOW_MAX_SECONDS:
             raise ValueError(
                 f"seconds must be more than 0 and at most {SOCKET_SHOW_MAX_SECONDS:g}"
             )
@@ -1276,6 +1277,11 @@ class StatusBarController(NSObject):
             "showProgramFromSocket:",
             json.dumps({"program": program, "seconds": seconds}),
             False,
+        )
+
+    def schedule_program_clear(self) -> None:
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "clearProgramShow:", None, False,
         )
 
     def handle_hook_event_message(self, provider: str, line: dict) -> None:
@@ -2558,8 +2564,11 @@ class StatusBarController(NSObject):
             )
             status.setTextColor_(NSColor.secondaryLabelColor())
 
-    def start_program_show(self, program: str, seconds: float) -> None:
-        """Play the program on each connected physical device, then restore live status."""
+    def start_program_show(self, program: str, seconds: float | None) -> None:
+        """Play the program on each connected physical device, then restore live status.
+
+        With seconds=None, the program stays until clear_program_show() or a newer show.
+        """
         if not self.leds_enabled:
             raise ValueError("Connect LEDs before showing this animation.")
         program = normalize_led_text(program)
@@ -2579,7 +2588,9 @@ class StatusBarController(NSObject):
 
         self.led_animation_token += 1
         token = self.led_animation_token
-        self.led_animation_until_monotonic = time.monotonic() + seconds
+        self.led_animation_until_monotonic = (
+            float("inf") if seconds is None else time.monotonic() + seconds
+        )
         thread = threading.Thread(
             target=self.show_animation_program_on_device_worker,
             args=(program, devices, token, seconds),
@@ -2592,7 +2603,7 @@ class StatusBarController(NSObject):
         program: str,
         devices: list[StatusBarDevice],
         token: int,
-        seconds: float = AGENT_ANIMATION_EDITOR_DEVICE_PREVIEW_SECONDS,
+        seconds: float | None = AGENT_ANIMATION_EDITOR_DEVICE_PREVIEW_SECONDS,
     ) -> None:
         for device in devices:
             try:
@@ -2613,6 +2624,8 @@ class StatusBarController(NSObject):
                 log_status_bar(
                     f"custom animation preview error {device.name}: {exc}"
                 )
+        if seconds is None:
+            return  # A hold stays until clear_program_show() or a newer show.
         time.sleep(seconds)
         self.performSelectorOnMainThread_withObject_waitUntilDone_(
             "restoreLedDisplay:",
@@ -3333,6 +3346,11 @@ class StatusBarController(NSObject):
     def showProgramFromSocket_(self, payload):
         show_program_from_socket(self, payload)
 
+    @objc.IBAction
+    def clearProgramShow_(self, _sender):
+        clear_program_show(self)
+        log_status_bar("socket clear")
+
     def connect_device(self) -> None:
         self.leds_enabled = True
         self.status_bar_devices()
@@ -3343,6 +3361,9 @@ class StatusBarController(NSObject):
 
     def disconnect_device(self) -> None:
         self.leds_enabled = False
+        # End any show or hold, so live status returns after a reconnect.
+        self.led_animation_token += 1
+        self.led_animation_until_monotonic = 0.0
         targets = self.current_led_targets()
         if not targets:
             targets = [
@@ -5809,10 +5830,21 @@ def restore_led_display(target, token_value) -> None:
 def show_program_from_socket(target, payload) -> None:
     try:
         request = json.loads(str(payload))
-        target.start_program_show(request["program"], float(request["seconds"]))
-        log_status_bar(f"socket show seconds={request['seconds']:g}")
+        seconds = None if request["seconds"] is None else float(request["seconds"])
+        target.start_program_show(request["program"], seconds)
+        label = "hold" if seconds is None else f"seconds={seconds:g}"
+        log_status_bar(f"socket show {label}")
     except Exception as exc:
         log_status_bar(f"socket show error: {exc}")
+
+
+def clear_program_show(target) -> None:
+    """End any show or hold at once and restore live status."""
+    if time.monotonic() >= target.led_animation_until_monotonic:
+        return
+    # A new token stops older workers from writing or restoring later.
+    target.led_animation_token += 1
+    restore_led_display(target, target.led_animation_token)
 
 
 def hook_status_text(config: ProviderConfig) -> str:

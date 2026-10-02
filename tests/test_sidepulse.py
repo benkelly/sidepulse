@@ -51,7 +51,12 @@ from sidepulse.device_writer import (
     write_led_program,
 )
 from sidepulse.hook import format_hook_payload, routed_hook_payload, write_hook_payload
-from sidepulse.ipc import HookEventServer, request_program_show, send_hook_event
+from sidepulse.ipc import (
+    HookEventServer,
+    request_program_clear,
+    request_program_show,
+    send_hook_event,
+)
 from sidepulse.install import (
     hook_command,
     install_claude_hooks,
@@ -2472,27 +2477,30 @@ class AgentMonitorTests(unittest.TestCase):
         fake = SimpleNamespace(
             performSelectorOnMainThread_withObject_waitUntilDone_=(
                 lambda selector, value, wait: scheduled.append(
-                    (selector, json.loads(value), wait)
+                    (selector, json.loads(value) if value else value, wait)
                 )
             )
         )
+        controller = status_bar.StatusBarController
         with tempfile.TemporaryDirectory() as tmp:
             server = HookEventServer(
                 lambda provider, line: None,
                 socket_path=Path(tmp) / "events.sock",
                 on_show=lambda program, seconds: (
-                    status_bar.StatusBarController.schedule_program_show(
-                        fake, program, seconds
-                    )
+                    controller.schedule_program_show(fake, program, seconds)
                 ),
+                on_clear=lambda: controller.schedule_program_clear(fake),
             )
             try:
                 server.start()
                 path = server.socket_path
-                self.assertEqual(
-                    request_program_show("#00FF00 1s pulse", 5, socket_path=path),
-                    "ok",
-                )
+                # A number of seconds plays a timed show, and None holds the show.
+                for seconds in (5, None):
+                    reply = request_program_show(
+                        "#00FF00 1s pulse", seconds, socket_path=path
+                    )
+                    self.assertEqual(reply, "ok")
+                self.assertEqual(request_program_clear(socket_path=path), "ok")
                 # A zero duration and a program over the 20-line limit both fail.
                 for program, seconds in (("#00FF00 1s pulse", 0), ("off\n" * 30, 5)):
                     reply = request_program_show(program, seconds, socket_path=path)
@@ -2507,9 +2515,72 @@ class AgentMonitorTests(unittest.TestCase):
                     "showProgramFromSocket:",
                     {"program": "#00FF00 1s pulse", "seconds": 5.0},
                     False,
-                )
+                ),
+                (
+                    "showProgramFromSocket:",
+                    {"program": "#00FF00 1s pulse", "seconds": None},
+                    False,
+                ),
+                ("clearProgramShow:", None, False),
             ],
         )
+
+    def test_status_bar_hold_lasts_until_clear_or_disconnect(self) -> None:
+        try:
+            from sidepulse import status_bar
+        except SystemExit as exc:
+            self.skipTest(str(exc))
+
+        scheduled = []
+        fake = SimpleNamespace(
+            leds_enabled=True,
+            led_animation_token=4,
+            led_animation_until_monotonic=float("inf"),
+            led_animation_write_lock=threading.Lock(),
+            performSelectorOnMainThread_withObject_waitUntilDone_=(
+                lambda *args: scheduled.append(args)
+            ),
+            current_led_targets=lambda: [],
+            status_bar_devices=lambda: [],
+            reset_led_controllers_for_display_change=lambda: None,
+        )
+        device = status_bar.StatusBarDevice(
+            device_id="/tmp/SidePulsePro",
+            name="SidePulse Pro",
+            root=Path("/tmp/SidePulsePro"),
+            target=Path("/tmp/SidePulsePro/LEDS.LED"),
+            connected=True,
+            display="agent",
+        )
+        with (
+            patch(
+                "sidepulse.status_bar.write_led_program", return_value=device.target
+            ) as write_program,
+            patch("sidepulse.status_bar.time.sleep") as sleep,
+            patch("sidepulse.status_bar.restore_led_display") as restore,
+        ):
+            # A hold writes once, and then it neither sleeps nor schedules a restore.
+            status_bar.StatusBarController.show_animation_program_on_device_worker(
+                fake, "#FF0000 0.3s cosine", [device], 4, None
+            )
+            write_program.assert_called_once()
+            sleep.assert_not_called()
+            self.assertEqual(scheduled, [])
+
+            # A clear restores live status with a new token, so old restores do nothing.
+            status_bar.clear_program_show(fake)
+            restore.assert_called_once_with(fake, 5)
+
+            # With no show active, a clear does nothing.
+            fake.led_animation_until_monotonic = 0.0
+            status_bar.clear_program_show(fake)
+            restore.assert_called_once()
+
+            # A disconnect ends a hold, so live status returns after a reconnect.
+            fake.led_animation_until_monotonic = float("inf")
+            status_bar.StatusBarController.disconnect_device(fake)
+            self.assertEqual(fake.led_animation_until_monotonic, 0.0)
+            self.assertEqual(fake.led_animation_token, 6)
 
     def test_status_history_status_text_is_compact(self) -> None:
         try:
